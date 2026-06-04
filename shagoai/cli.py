@@ -1,3 +1,4 @@
+from shagoai import __version__
 import argparse
 import json
 from dataclasses import dataclass, field
@@ -147,6 +148,8 @@ def print_help() -> None:
         ("/undo", "rollback write_file terakhir"),
         ("/clear", "bersihkan layar"),
         ("/exit", "keluar"),
+        ("/version", "lihat versi SHAGO AI"),
+        ("/update", "lihat command update SHAGO AI"),
     ]
 
     for cmd, desc in rows:
@@ -609,6 +612,23 @@ def handle_command(command: str) -> bool:
             )
         )
         return True
+    
+    if raw == "/version":
+        console.print(f"[cyan]shagoai[/cyan] {__version__}")
+        return True
+
+    if raw == "/update":
+        console.print(
+            Panel(
+                "Run this command outside SHAGO AI:\n\n"
+                "[cyan]curl -fsSL https://raw.githubusercontent.com/oviekshagya51/shagoai/main/install.sh | sh[/cyan]\n\n"
+                "Your config will be kept at:\n"
+                f"[white]{CONFIG_FILE}[/white]",
+                title="[bold cyan]update SHAGO AI[/bold cyan]",
+                border_style="cyan",
+            )
+        )
+        return True
 
     console.print(f"[red]Unknown command:[/red] {raw}")
     return True
@@ -639,8 +659,14 @@ def main() -> None:
         default=None,
         help="Set Shago AI Server URL for this session.",
     )
-
+    
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Show SHAGO AI version.",
+    )
     args = parser.parse_args()
+	
 
     config = load_config()
 

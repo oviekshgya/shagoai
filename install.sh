@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="shagoai"
-REPO_URL="git+https://github.com/oviekshgya/ollama-agent.git"
+REPO_URL="${SHAGO_REPO_URL:-git+https://github.com/oviekshagya51/shagoai.git}"
 
 CONFIG_DIR="$HOME/.config/shagoai"
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -21,24 +21,34 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Checking Python..."
+echo "Python:"
 python3 --version
-
 echo ""
-echo "Installing pipx if needed..."
 
+echo "Ensuring pipx..."
 python3 -m pip install --user --upgrade pipx >/dev/null 2>&1 || true
 python3 -m pipx ensurepath >/dev/null 2>&1 || true
 
 export PATH="$HOME/.local/bin:$PATH"
 
-if ! command -v pipx >/dev/null 2>&1; then
+if command -v "$APP_NAME" >/dev/null 2>&1; then
+  echo "Existing SHAGO AI found:"
+  "$APP_NAME" --version 2>/dev/null || true
+  echo ""
+  echo "Updating SHAGO AI..."
+else
+  echo "Installing SHAGO AI..."
+fi
+
+if command -v pipx >/dev/null 2>&1; then
+  # --force makes this installer idempotent:
+  # - install if missing
+  # - replace/update if already installed
+  pipx install --force "$REPO_URL"
+else
   echo "pipx not found after install."
   echo "Fallback to pip --user..."
-  python3 -m pip install --user --upgrade "$REPO_URL"
-else
-  echo "Installing SHAGO AI CLI..."
-  pipx install --force "$REPO_URL"
+  python3 -m pip install --user --upgrade --force-reinstall "$REPO_URL"
 fi
 
 mkdir -p "$CONFIG_DIR"
@@ -59,19 +69,27 @@ if [ ! -f "$CONFIG_FILE" ]; then
   "rpk_max_diff_chars": 18000
 }
 EOF
+  echo "Created config:"
+  echo "  $CONFIG_FILE"
+else
+  echo "Keeping existing config:"
+  echo "  $CONFIG_FILE"
 fi
 
 echo ""
-echo "SHAGO AI installed."
-echo ""
-echo "Next:"
-echo "  shagoai"
-echo ""
-echo "Config:"
-echo "  $CONFIG_FILE"
+echo "SHAGO AI ready."
 echo ""
 
-if ! command -v shagoai >/dev/null 2>&1; then
+if command -v "$APP_NAME" >/dev/null 2>&1; then
+  "$APP_NAME" --version 2>/dev/null || true
+fi
+
+echo ""
+echo "Run:"
+echo "  shagoai"
+echo ""
+
+if ! command -v "$APP_NAME" >/dev/null 2>&1; then
   echo "NOTE: shagoai command not found in current shell."
   echo "Run:"
   echo "  source ~/.bashrc"
