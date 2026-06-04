@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="shagoai"
-REPO_URL="${SHAGO_REPO_URL:-git+https://github.com/oviekshgya/ollama-agent.git}"
+REPO_URL="${SHAGO_REPO_URL:-git+https://github.com/oviekshgya/shagoai.git}"
 
 CONFIG_DIR="$HOME/.config/shagoai"
 CONFIG_FILE="$CONFIG_DIR/config.json"
