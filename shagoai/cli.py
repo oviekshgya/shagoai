@@ -47,6 +47,33 @@ class AgentState:
 
 STATE = AgentState()
 
+CONFIG_DIR = Path.home() / ".config" / "shagoai"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+def load_config() -> dict[str, Any]:
+    try:
+        if CONFIG_FILE.exists():
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
+    return {}
+
+
+def save_config(data: dict[str, Any]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def set_config_value(key: str, value: Any) -> None:
+    config = load_config()
+    config[key] = value
+    save_config(config)
+
 
 def shorten_path(path: Path) -> str:
     home = Path.home()
@@ -109,10 +136,17 @@ def choose_default_model() -> str:
         return env_model
 
     models = get_installed_models()
+    config = load_config()
+
+    saved_model = config.get("model")
+    if saved_model:
+        if not models or saved_model in models:
+            return saved_model
+
     if models:
         return models[0]
 
-    return "gemma4:31b-cloud"
+    return "minimax-m3:cloud"
 
 
 def render_banner() -> None:
@@ -597,7 +631,55 @@ def handle_command(command: str) -> bool:
         return True
 
     if raw == "/model":
+        models = get_installed_models()
+
+        table = Table(title="Model selection", border_style="cyan")
+        table.add_column("#", style="cyan", no_wrap=True)
+        table.add_column("Model", style="white")
+        table.add_column("Active", style="green")
+
+        for idx, model in enumerate(models, start=1):
+            table.add_row(str(idx), model, "yes" if model == STATE.model else "")
+
+        if not models:
+            table.add_row("-", "(no models found)", "")
+
+        console.print(table)
         console.print(f"[cyan]current model:[/cyan] {STATE.model}")
+        console.print("[dim]Usage: /model <name> or /model <number>[/dim]")
+        console.print("[dim]Example: /model gemma4:31b-cloud[/dim]")
+        console.print("[dim]Example: /model 2[/dim]")
+        return True
+
+    if raw.startswith("/model "):
+        value = raw.split(" ", 1)[1].strip()
+        models = get_installed_models()
+
+        if not value:
+            console.print("[red]Usage:[/red] /model <name>")
+            return True
+
+        selected = value
+
+        if value.isdigit():
+            index = int(value) - 1
+
+            if index < 0 or index >= len(models):
+                console.print(f"[red]Invalid model number:[/red] {value}")
+                return True
+
+            selected = models[index]
+
+        if models and selected not in models:
+            console.print(f"[red]Model not found:[/red] {selected}")
+            console.print("[dim]Run /models or /model to see available models.[/dim]")
+            return True
+
+        STATE.model = selected
+        set_config_value("model", STATE.model)
+
+        console.print(f"[green]model set:[/green] {STATE.model}")
+        console.print("[dim]Saved as default model.[/dim]")
         return True
 
     if raw.startswith("/model "):
