@@ -1,26 +1,23 @@
-from shagoai.config import load_config, set_config_value, CONFIG_FILE
 import argparse
-import os
-import re
 import json
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ollama import chat, list as list_models
-from ollama import ResponseError
-
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.markdown import Markdown
-from rich.syntax import Syntax
-from rich.prompt import Confirm
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.prompt import Confirm
+from rich.syntax import Syntax
+from rich.table import Table
+
+from shagoai.client import ShagoClient, ShagoClientError
+from shagoai.config import CONFIG_FILE, load_config, set_config_value
+from shagoai.tools import LocalTools, preview_text
 
 
 console = Console()
@@ -36,118 +33,75 @@ SHAGO_LOGO = r"""
 """
 
 
+SYSTEM_PROMPT = """
+Kamu adalah Shago, agentic coding CLI.
+
+Aturan:
+- Jawab dalam Bahasa Indonesia.
+- Kamu berjalan sebagai coding agent di workspace user.
+- Jangan menebak isi file. Kalau perlu tahu isi file, gunakan tool read_file.
+- Untuk memahami project, mulai dari list_dir, lalu baca file penting.
+- Gunakan search_text untuk mencari simbol/function/teks.
+- Gunakan run_cmd untuk test/build hanya jika memang perlu.
+- Untuk perubahan file, gunakan write_file.
+- Jangan membuat perubahan tanpa alasan jelas.
+- Setelah tool selesai, jelaskan hasilnya ringkas.
+- Jika task kompleks, buat plan singkat lalu lanjut eksekusi.
+- Prioritaskan jawaban praktis dan langsung bisa dijalankan.
+"""
+
+
 @dataclass
 class AgentState:
-    model: str = ""
+    model: str = "default"
+    api_url: str = "http://127.0.0.1:8787"
+    token: str = ""
     root: Path = field(default_factory=lambda: Path.cwd().resolve())
     mode: str = "plan → act → verify"
     guard: str = "approval required"
     max_turns: int = 8
-    last_write_backup: tuple[Path, str | None] | None = None
 
 
 STATE = AgentState()
-
-CONFIG_DIR = Path.home() / ".config" / "shagoai"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-
-
-# def load_config() -> dict[str, Any]:
-#     try:
-#         if CONFIG_FILE.exists():
-#             return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-#     except Exception:
-#         pass
-
-#     return {}
-
-
-def save_config(data: dict[str, Any]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-def set_config_value(key: str, value: Any) -> None:
-    config = load_config()
-    config[key] = value
-    save_config(config)
+TOOLS: LocalTools | None = None
 
 
 def shorten_path(path: Path) -> str:
     home = Path.home()
+
     try:
         return "~/" + str(path.relative_to(home))
     except ValueError:
         return str(path)
 
 
-def extract_model_name(model_obj: Any) -> str | None:
-    if isinstance(model_obj, dict):
-        return model_obj.get("model") or model_obj.get("name")
-
-    return getattr(model_obj, "model", None) or getattr(model_obj, "name", None)
-
-
-def get_installed_models() -> list[str]:
-    names: list[str] = []
-
-    try:
-        response = list_models()
-        models = getattr(response, "models", None)
-
-        if models is None and isinstance(response, dict):
-            models = response.get("models", [])
-
-        for item in models or []:
-            name = extract_model_name(item)
-            if name:
-                names.append(name)
-    except Exception:
-        pass
-
-    if names:
-        return names
-
-    # Fallback kalau Python SDK gagal membaca list model.
-    try:
-        result = subprocess.run(
-            ["ollama", "ls"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            lines = result.stdout.splitlines()[1:]
-            for line in lines:
-                parts = line.split()
-                if parts:
-                    names.append(parts[0])
-    except Exception:
-        pass
-
-    return names
-
-
-def choose_default_model() -> str:
-    env_model = os.getenv("SHAGO_MODEL") or os.getenv("OLLAMA_MODEL")
-    if env_model:
-        return env_model
-
-    models = get_installed_models()
+def build_client() -> ShagoClient:
     config = load_config()
 
-    saved_model = config.get("model")
-    if saved_model:
-        if not models or saved_model in models:
-            return saved_model
+    STATE.api_url = str(config.get("api_url") or STATE.api_url)
+    STATE.token = str(config.get("token") or "")
+    STATE.model = str(config.get("model") or STATE.model)
+    STATE.guard = str(config.get("guard") or STATE.guard)
 
-    if models:
-        return models[0]
+    return ShagoClient(
+        api_url=STATE.api_url,
+        token=STATE.token,
+    )
 
-    return "minimax-m3:cloud"
+
+def ensure_tools() -> LocalTools:
+    global TOOLS
+
+    if TOOLS is None:
+        TOOLS = LocalTools(
+            root=STATE.root,
+            get_guard=lambda: STATE.guard,
+            confirm_callback=confirm_tool_action,
+            notify_callback=notify_tool_event,
+        )
+
+    TOOLS.set_root(STATE.root)
+    return TOOLS
 
 
 def render_banner() -> None:
@@ -155,6 +109,7 @@ def render_banner() -> None:
         f"[bold cyan]{SHAGO_LOGO}[/bold cyan]\n"
         "[bold white]local autonomous coding interface[/bold white]\n\n"
         f"[cyan]AI[/cyan]        [white]{STATE.model}[/white]\n"
+        f"[cyan]SERVER[/cyan]    [white]{STATE.api_url}[/white]\n"
         f"[cyan]ROOT[/cyan]      [white]{shorten_path(STATE.root)}[/white]\n"
         f"[cyan]MODE[/cyan]      [white]{STATE.mode}[/white]\n"
         f"[cyan]GUARD[/cyan]     [white]{STATE.guard}[/white]"
@@ -178,7 +133,10 @@ def print_help() -> None:
 
     rows = [
         ("/help", "lihat bantuan"),
-        ("/models", "lihat model yang tersedia"),
+        ("/health", "cek koneksi ke Shago AI Server"),
+        ("/config", "lihat konfigurasi"),
+        ("/config set <key> <value>", "ubah konfigurasi"),
+        ("/models", "lihat model dari Shago AI Server"),
         ("/model", "lihat model aktif"),
         ("/model <name>", "ganti model aktif"),
         ("/workspace", "lihat root workspace"),
@@ -197,264 +155,56 @@ def print_help() -> None:
     console.print(table)
 
 
-def resolve_workspace_path(path: str) -> Path:
-    raw = Path(path).expanduser()
-
-    if not raw.is_absolute():
-        raw = STATE.root / raw
-
-    resolved = raw.resolve()
-
-    # File tools dibatasi agar tidak keluar dari workspace.
-    if resolved != STATE.root and STATE.root not in resolved.parents:
-        raise ValueError(f"path keluar dari workspace: {path}")
-
-    return resolved
-
-
-def preview_text(text: str, limit: int = 20_000) -> str:
-    if len(text) <= limit:
-        return text
-
-    return text[:limit] + f"\n\n[TRUNCATED: {len(text) - limit} chars omitted]"
-
-
-def list_dir(path: str = ".") -> str:
-    """List files and folders inside the workspace.
-
-    Args:
-        path: Relative directory path to list.
-    """
-    try:
-        target = resolve_workspace_path(path)
-
-        if not target.exists():
-            return f"ERROR: path not found: {path}"
-
-        if not target.is_dir():
-            return f"ERROR: not a directory: {path}"
-
-        rows = []
-
-        for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-            suffix = "/" if item.is_dir() else ""
-            rows.append(f"{item.name}{suffix}")
-
-        return "\n".join(rows) if rows else "(empty directory)"
-    except Exception as exc:
-        return f"ERROR: {exc}"
-
-
-def read_file(path: str) -> str:
-    """Read a text file from the workspace.
-
-    Args:
-        path: Relative file path to read.
-    """
-    try:
-        target = resolve_workspace_path(path)
-
-        if not target.exists():
-            return f"ERROR: file not found: {path}"
-
-        if not target.is_file():
-            return f"ERROR: not a file: {path}"
-
-        data = target.read_text(encoding="utf-8", errors="replace")
-        return preview_text(data)
-    except Exception as exc:
-        return f"ERROR: {exc}"
-
-
-def write_file(path: str, content: str) -> str:
-    """Write content to a file inside the workspace.
-
-    Args:
-        path: Relative file path to write.
-        content: New file content.
-    """
-    try:
-        target = resolve_workspace_path(path)
-        before = target.read_text(encoding="utf-8", errors="replace") if target.exists() else None
+def confirm_tool_action(action: str, payload: dict[str, Any]) -> bool:
+    if action == "write_file":
+        content = (
+            f"[cyan]file[/cyan]   {payload.get('path')}\n"
+            f"[cyan]action[/cyan] write\n"
+            f"[cyan]chars[/cyan]  {payload.get('chars')}"
+        )
 
         console.print(
             Panel(
-                f"[cyan]file[/cyan]   {path}\n"
-                f"[cyan]action[/cyan] write\n"
-                f"[cyan]chars[/cyan]  {len(content)}",
+                content,
                 title="[bold yellow]proposed change[/bold yellow]",
                 border_style="yellow",
                 expand=False,
             )
         )
 
-        if STATE.guard == "approval required":
-            if not Confirm.ask("Apply this change?", default=False):
-                return "CANCELLED by user"
+        return Confirm.ask("Apply this change?", default=False)
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        STATE.last_write_backup = (target, before)
-
-        return f"OK: wrote {path}"
-    except Exception as exc:
-        return f"ERROR: {exc}"
-
-
-def run_cmd(command: str) -> str:
-    """Run a shell command from the workspace root.
-
-    Args:
-        command: Shell command to execute.
-    """
-    blocked_patterns = [
-        r"\brm\s+-rf\b",
-        r"\bdd\s+",
-        r"\bmkfs\b",
-        r"\bshutdown\b",
-        r"\breboot\b",
-        r":\(\)\{",
-        r">\s*/dev/sd",
-        r"\bchmod\s+-R\s+777\b",
-    ]
-
-    if any(re.search(pattern, command) for pattern in blocked_patterns):
-        return "BLOCKED: dangerous command"
-
-    console.print(
-        Panel(
+    if action == "run_cmd":
+        content = (
             f"[cyan]cwd[/cyan]     {shorten_path(STATE.root)}\n"
-            f"[cyan]command[/cyan] {command}",
-            title="[bold yellow]command request[/bold yellow]",
-            border_style="yellow",
-            expand=False,
-        )
-    )
-
-    if STATE.guard == "approval required":
-        if not Confirm.ask("Run this command?", default=False):
-            return "CANCELLED by user"
-
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(STATE.root),
-            capture_output=True,
-            text=True,
-            timeout=60,
+            f"[cyan]command[/cyan] {payload.get('command')}"
         )
 
-        return (
-            f"EXIT_CODE: {result.returncode}\n\n"
-            f"STDOUT:\n{preview_text(result.stdout, 12_000)}\n\n"
-            f"STDERR:\n{preview_text(result.stderr, 12_000)}"
+        console.print(
+            Panel(
+                content,
+                title="[bold yellow]command request[/bold yellow]",
+                border_style="yellow",
+                expand=False,
+            )
         )
-    except subprocess.TimeoutExpired:
-        return "ERROR: command timeout after 60 seconds"
-    except Exception as exc:
-        return f"ERROR: {exc}"
+
+        return Confirm.ask("Run this command?", default=False)
+
+    return Confirm.ask(f"Confirm {action}?", default=False)
 
 
-def search_text(pattern: str, path: str = ".") -> str:
-    """Search text in files inside the workspace.
-
-    Args:
-        pattern: Regex or plain text pattern to search.
-        path: Relative path to search from.
-    """
-    try:
-        root = resolve_workspace_path(path)
-
-        if root.is_file():
-            files = [root]
-        else:
-            ignored = {
-                ".git",
-                "node_modules",
-                ".venv",
-                "venv",
-                "__pycache__",
-                "dist",
-                "build",
-            }
-
-            files = [
-                p for p in root.rglob("*")
-                if p.is_file() and not any(part in ignored for part in p.parts)
-            ]
-
-        regex = re.compile(pattern, re.IGNORECASE)
-        hits = []
-
-        for file_path in files[:2000]:
-            try:
-                text = file_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-
-            for idx, line in enumerate(text.splitlines(), start=1):
-                if regex.search(line):
-                    rel = file_path.relative_to(STATE.root)
-                    hits.append(f"{rel}:{idx}: {line.strip()}")
-
-                    if len(hits) >= 80:
-                        return "\n".join(hits) + "\n\n[TRUNCATED: max 80 hits]"
-
-        return "\n".join(hits) if hits else "No matches"
-    except Exception as exc:
-        return f"ERROR: {exc}"
-
-
-def git_status() -> str:
-    """Show git status for the workspace."""
-    return run_cmd("git status --short")
-
-
-def git_diff() -> str:
-    """Show git diff for the workspace."""
-    return run_cmd("git diff -- .")
-
-
-TOOLS = {
-    "list_dir": list_dir,
-    "read_file": read_file,
-    "write_file": write_file,
-    "run_cmd": run_cmd,
-    "search_text": search_text,
-    "git_status": git_status,
-    "git_diff": git_diff,
-}
-
-
-SYSTEM_PROMPT = """
-Kamu adalah Shago, agentic coding CLI lokal.
-
-Aturan kerja:
-- Jawab dalam Bahasa Indonesia.
-- Jangan menebak isi file. Jika butuh isi file, gunakan read_file.
-- Untuk memahami project, mulai dari list_dir, lalu baca file penting.
-- Gunakan run_cmd untuk test/build hanya jika memang perlu.
-- Jangan membuat perubahan tanpa alasan jelas.
-- Untuk perubahan file, gunakan write_file.
-- Setelah menjalankan tool, jelaskan hasilnya secara ringkas.
-- Jika task kompleks, buat plan singkat lalu lanjut eksekusi.
-- Prioritaskan solusi praktis, langsung bisa dijalankan.
-"""
-
-
-def get_response_message(response: Any) -> Any:
-    if isinstance(response, dict):
-        return response.get("message", {})
-
-    return getattr(response, "message", {})
+def notify_tool_event(event: str, payload: dict[str, Any]) -> None:
+    # Untuk sekarang event detail ditampilkan saat confirmation.
+    # Function ini tetap ada supaya tools.py modular dan bisa dipakai TUI/Rust nanti.
+    return None
 
 
 def get_message_content(message: Any) -> str:
     if isinstance(message, dict):
-        return message.get("content") or ""
+        return str(message.get("content") or "")
 
-    return getattr(message, "content", None) or ""
+    return str(getattr(message, "content", "") or "")
 
 
 def get_tool_calls(message: Any) -> list[Any]:
@@ -496,24 +246,22 @@ def render_tool_call(name: str, args: dict[str, Any]) -> None:
     )
 
 
-def append_assistant_message(messages: list[dict[str, Any]], message: Any) -> None:
-    if isinstance(message, dict):
-        messages.append(message)
-        return
-
-    item = {
-        "role": getattr(message, "role", "assistant"),
-        "content": getattr(message, "content", "") or "",
+def normalize_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+    normalized = {
+        "role": message.get("role", "assistant"),
+        "content": message.get("content") or "",
     }
 
-    tool_calls = getattr(message, "tool_calls", None)
-    if tool_calls:
-        item["tool_calls"] = tool_calls
+    if message.get("tool_calls"):
+        normalized["tool_calls"] = message["tool_calls"]
 
-    messages.append(item)
+    return normalized
 
 
 def run_agent(user_prompt: str) -> None:
+    client = build_client()
+    tools = ensure_tools()
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
@@ -522,37 +270,33 @@ def run_agent(user_prompt: str) -> None:
     for _ in range(STATE.max_turns):
         try:
             with console.status("[cyan]● thinking[/cyan]", spinner="dots"):
-                response = chat(
+                response = client.chat(
                     model=STATE.model,
                     messages=messages,
-                    tools=list(TOOLS.values()),
-                    options={
-                        "temperature": 0.2,
-                        "num_ctx": 8192,
-                    },
+                    tools=tools.tool_specs(),
+                    temperature=0.2,
+                    max_turns=STATE.max_turns,
                 )
-        except ResponseError as exc:
-            if getattr(exc, "status_code", None) == 404:
-                console.print(
-                    Panel(
-                        f"Model [bold red]{STATE.model}[/bold red] tidak ditemukan.\n\n"
-                        "Jalankan [cyan]/models[/cyan] untuk lihat model tersedia, "
-                        "lalu pakai [cyan]/model <nama-model>[/cyan].\n\n"
-                        "Contoh:\n"
-                        "[cyan]/model gemma4:31b-cloud[/cyan]",
-                        title="[bold red]model error[/bold red]",
-                        border_style="red",
-                    )
+        except ShagoClientError as exc:
+            console.print(
+                Panel(
+                    str(exc),
+                    title="[bold red]server error[/bold red]",
+                    border_style="red",
                 )
-            else:
-                console.print(f"[red]ERROR:[/red] {exc}")
-
+            )
             return
         except Exception as exc:
-            console.print(f"[red]ERROR:[/red] {exc}")
+            console.print(
+                Panel(
+                    str(exc),
+                    title="[bold red]unexpected error[/bold red]",
+                    border_style="red",
+                )
+            )
             return
 
-        message = get_response_message(response)
+        message = response.get("message") or {}
         tool_calls = get_tool_calls(message)
 
         if not tool_calls:
@@ -565,22 +309,16 @@ def run_agent(user_prompt: str) -> None:
 
             return
 
-        append_assistant_message(messages, message)
+        messages.append(normalize_assistant_message(message))
 
         for call in tool_calls:
             name, args = parse_tool_call(call)
 
-            if not name or name not in TOOLS:
-                result = f"ERROR: unknown tool {name}"
+            if not name:
+                result = "ERROR: tool call missing function name"
             else:
                 render_tool_call(name, args)
-
-                try:
-                    result = TOOLS[name](**args)
-                except TypeError as exc:
-                    result = f"ERROR: invalid tool arguments: {exc}"
-                except Exception as exc:
-                    result = f"ERROR: tool failed: {exc}"
+                result = tools.call_tool(name, args)
 
             console.print(
                 Panel(
@@ -591,157 +329,20 @@ def run_agent(user_prompt: str) -> None:
                 )
             )
 
-            messages.append({
-                "role": "tool",
-                "tool_name": name or "unknown",
-                "content": str(result),
-            })
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_name": name or "unknown",
+                    "content": str(result),
+                }
+            )
 
-    console.print("[yellow]Agent berhenti karena mencapai batas turn. Coba pecah task jadi lebih kecil.[/yellow]")
+    console.print(
+        "[yellow]Agent berhenti karena mencapai batas turn. Coba pecah task jadi lebih kecil.[/yellow]"
+    )
 
 
-def handle_command(command: str) -> bool:
-    raw = command.strip()
-
-    if raw in {"/exit", "/quit"}:
-        return False
-
-    if raw == "/clear":
-        console.clear()
-        render_banner()
-        return True
-
-    if raw == "/help":
-        print_help()
-        return True
-
-    if raw == "/models":
-        models = get_installed_models()
-
-        table = Table(title="Available models", border_style="cyan")
-        table.add_column("Model", style="white")
-        table.add_column("Active", style="cyan")
-
-        for model in models:
-            table.add_row(model, "yes" if model == STATE.model else "")
-
-        if not models:
-            table.add_row("(none)", "")
-
-        console.print(table)
-        return True
-
-    if raw == "/model":
-        models = get_installed_models()
-
-        table = Table(title="Model selection", border_style="cyan")
-        table.add_column("#", style="cyan", no_wrap=True)
-        table.add_column("Model", style="white")
-        table.add_column("Active", style="green")
-
-        for idx, model in enumerate(models, start=1):
-            table.add_row(str(idx), model, "yes" if model == STATE.model else "")
-
-        if not models:
-            table.add_row("-", "(no models found)", "")
-
-        console.print(table)
-        console.print(f"[cyan]current model:[/cyan] {STATE.model}")
-        console.print("[dim]Usage: /model <name> or /model <number>[/dim]")
-        console.print("[dim]Example: /model gemma4:31b-cloud[/dim]")
-        console.print("[dim]Example: /model 2[/dim]")
-        return True
-
-    if raw.startswith("/model "):
-        value = raw.split(" ", 1)[1].strip()
-        models = get_installed_models()
-
-        if not value:
-            console.print("[red]Usage:[/red] /model <name>")
-            return True
-
-        selected = value
-
-        if value.isdigit():
-            index = int(value) - 1
-
-            if index < 0 or index >= len(models):
-                console.print(f"[red]Invalid model number:[/red] {value}")
-                return True
-
-            selected = models[index]
-
-        if models and selected not in models:
-            console.print(f"[red]Model not found:[/red] {selected}")
-            console.print("[dim]Run /models or /model to see available models.[/dim]")
-            return True
-
-        STATE.model = selected
-        set_config_value("model", STATE.model)
-
-        console.print(f"[green]model set:[/green] {STATE.model}")
-        console.print("[dim]Saved as default model.[/dim]")
-        return True
-
-    if raw.startswith("/model "):
-        name = raw.split(" ", 1)[1].strip()
-
-        if not name:
-            console.print("[red]Usage:[/red] /model <name>")
-            return True
-
-        STATE.model = name
-        console.print(f"[green]model set:[/green] {STATE.model}")
-        return True
-
-    if raw == "/workspace":
-        console.print(f"[cyan]workspace:[/cyan] {shorten_path(STATE.root)}")
-        return True
-
-    if raw.startswith("/workspace "):
-        path = Path(raw.split(" ", 1)[1].strip()).expanduser().resolve()
-
-        if not path.exists() or not path.is_dir():
-            console.print(f"[red]Invalid directory:[/red] {path}")
-            return True
-
-        STATE.root = path
-        console.print(f"[green]workspace set:[/green] {shorten_path(STATE.root)}")
-        return True
-
-    if raw == "/safe":
-        STATE.guard = "approval required"
-        console.print("[green]guard set:[/green] approval required")
-        return True
-
-    if raw == "/auto":
-        STATE.guard = "confirm destructive"
-        console.print("[yellow]guard set:[/yellow] confirm destructive")
-        return True
-
-    if raw == "/diff":
-        console.print(Panel(git_diff(), title="[cyan]git diff[/cyan]", border_style="cyan"))
-        return True
-
-    if raw == "/undo":
-        if not STATE.last_write_backup:
-            console.print("[yellow]No write backup available.[/yellow]")
-            return True
-
-        path, before = STATE.last_write_backup
-
-        if before is None:
-            if path.exists():
-                path.unlink()
-
-            console.print(f"[green]removed file:[/green] {path.relative_to(STATE.root)}")
-        else:
-            path.write_text(before, encoding="utf-8")
-            console.print(f"[green]restored file:[/green] {path.relative_to(STATE.root)}")
-
-        STATE.last_write_backup = None
-        return True
-    
+def handle_config_command(raw: str) -> bool:
     if raw == "/config":
         config = load_config()
 
@@ -750,10 +351,12 @@ def handle_command(command: str) -> bool:
         table.add_column("Value", style="white")
 
         for key, value in config.items():
-            if key == "token" and value:
-                value = value[:6] + "..." + value[-4:]
+            display_value = str(value)
 
-            table.add_row(str(key), str(value))
+            if key == "token" and display_value:
+                display_value = display_value[:6] + "..." + display_value[-4:]
+
+            table.add_row(str(key), display_value)
 
         console.print(table)
         console.print(f"[dim]config file: {CONFIG_FILE}[/dim]")
@@ -785,9 +388,208 @@ def handle_command(command: str) -> bool:
         if key == "guard":
             STATE.guard = value
 
+        if key == "api_url":
+            STATE.api_url = value
+
+        if key == "token":
+            STATE.token = value
+
         console.print(f"[green]config updated:[/green] {key}")
         return True
-    
+
+    return False
+
+
+def fetch_remote_models() -> list[str]:
+    client = build_client()
+
+    try:
+        response = client.models()
+    except ShagoClientError as exc:
+        console.print(
+            Panel(
+                str(exc),
+                title="[bold red]models error[/bold red]",
+                border_style="red",
+            )
+        )
+        return []
+
+    models = response.get("models") or []
+    names = []
+
+    for item in models:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("model")
+        else:
+            name = str(item)
+
+        if name:
+            names.append(str(name))
+
+    return names
+
+
+def handle_command(command: str) -> bool:
+    raw = command.strip()
+
+    if raw in {"/exit", "/quit", "/q", "/bye"}:
+        return False
+
+    if raw == "/clear":
+        console.clear()
+        render_banner()
+        return True
+
+    if raw == "/help":
+        print_help()
+        return True
+
+    if raw == "/health":
+        client = build_client()
+
+        try:
+            response = client.health()
+            console.print(
+                Panel(
+                    json.dumps(response, indent=2, ensure_ascii=False),
+                    title="[bold green]server health[/bold green]",
+                    border_style="green",
+                )
+            )
+        except ShagoClientError as exc:
+            console.print(
+                Panel(
+                    str(exc),
+                    title="[bold red]server health failed[/bold red]",
+                    border_style="red",
+                )
+            )
+
+        return True
+
+    if raw == "/config" or raw.startswith("/config set "):
+        return handle_config_command(raw)
+
+    if raw == "/models":
+        names = fetch_remote_models()
+
+        table = Table(title="Available models", border_style="cyan")
+        table.add_column("#", style="cyan", no_wrap=True)
+        table.add_column("Model", style="white")
+        table.add_column("Active", style="green")
+
+        for idx, name in enumerate(names, start=1):
+            table.add_row(str(idx), name, "yes" if name == STATE.model else "")
+
+        if not names:
+            table.add_row("-", "(no models found)", "")
+
+        console.print(table)
+        return True
+
+    if raw == "/model":
+        names = fetch_remote_models()
+
+        table = Table(title="Model selection", border_style="cyan")
+        table.add_column("#", style="cyan", no_wrap=True)
+        table.add_column("Model", style="white")
+        table.add_column("Active", style="green")
+
+        for idx, name in enumerate(names, start=1):
+            active = "yes" if name == STATE.model else ""
+            table.add_row(str(idx), name, active)
+
+        if not names:
+            table.add_row("-", "(no models found)", "")
+
+        console.print(table)
+        console.print(f"[cyan]current model:[/cyan] {STATE.model}")
+        console.print("[dim]Usage: /model <name> or /model <number>[/dim]")
+        return True
+
+    if raw.startswith("/model "):
+        value = raw.split(" ", 1)[1].strip()
+        names = fetch_remote_models()
+
+        if not value:
+            console.print("[red]Usage:[/red] /model <name>")
+            return True
+
+        selected = value
+
+        if value.isdigit():
+            index = int(value) - 1
+
+            if index < 0 or index >= len(names):
+                console.print(f"[red]Invalid model number:[/red] {value}")
+                return True
+
+            selected = names[index]
+
+        if names and selected not in names and selected != "default":
+            console.print(f"[red]Model not found:[/red] {selected}")
+            console.print("[dim]Run /models or /model to see available models.[/dim]")
+            return True
+
+        STATE.model = selected
+        set_config_value("model", STATE.model)
+
+        console.print(f"[green]model set:[/green] {STATE.model}")
+        console.print("[dim]Saved as default model.[/dim]")
+        return True
+
+    if raw == "/workspace":
+        console.print(f"[cyan]workspace:[/cyan] {shorten_path(STATE.root)}")
+        return True
+
+    if raw.startswith("/workspace "):
+        path = Path(raw.split(" ", 1)[1].strip()).expanduser().resolve()
+
+        if not path.exists() or not path.is_dir():
+            console.print(f"[red]Invalid directory:[/red] {path}")
+            return True
+
+        STATE.root = path
+        ensure_tools().set_root(STATE.root)
+
+        console.print(f"[green]workspace set:[/green] {shorten_path(STATE.root)}")
+        return True
+
+    if raw == "/safe":
+        STATE.guard = "approval required"
+        set_config_value("guard", STATE.guard)
+        console.print("[green]guard set:[/green] approval required")
+        return True
+
+    if raw == "/auto":
+        STATE.guard = "confirm destructive"
+        set_config_value("guard", STATE.guard)
+        console.print("[yellow]guard set:[/yellow] confirm destructive")
+        return True
+
+    if raw == "/diff":
+        result = ensure_tools().git_diff()
+        console.print(
+            Panel(
+                preview_text(result, 12000),
+                title="[cyan]git diff[/cyan]",
+                border_style="cyan",
+            )
+        )
+        return True
+
+    if raw == "/undo":
+        result = ensure_tools().undo_last_write()
+        console.print(
+            Panel(
+                result,
+                title="[cyan]undo[/cyan]",
+                border_style="cyan",
+            )
+        )
+        return True
+
     console.print(f"[red]Unknown command:[/red] {raw}")
     return True
 
@@ -812,20 +614,42 @@ def main() -> None:
         help="Set model name.",
     )
 
+    parser.add_argument(
+        "--api-url",
+        default=None,
+        help="Set Shago AI Server URL for this session.",
+    )
+
     args = parser.parse_args()
 
-    STATE.root = Path(args.workspace).expanduser().resolve() if args.workspace else Path.cwd().resolve()
-    STATE.model = args.model or choose_default_model()
+    config = load_config()
+
+    STATE.root = (
+        Path(args.workspace).expanduser().resolve()
+        if args.workspace
+        else Path.cwd().resolve()
+    )
+
+    STATE.api_url = args.api_url or str(config.get("api_url") or STATE.api_url)
+    STATE.token = str(config.get("token") or "")
+    STATE.model = args.model or str(config.get("model") or STATE.model)
+    STATE.guard = str(config.get("guard") or STATE.guard)
+
+    ensure_tools()
 
     console.clear()
     render_banner()
-    console.print("[dim]Tip: Use [cyan]/plan[/cyan] in your prompt to preview actions before execution.[/dim]\n")
+    console.print(
+        "[dim]Tip: Use [cyan]/plan[/cyan] in your prompt to preview actions before execution.[/dim]\n"
+    )
 
     history_path = str(Path.home() / ".shago_agent_history")
 
-    style = Style.from_dict({
-        "prompt": "ansicyan bold",
-    })
+    style = Style.from_dict(
+        {
+            "prompt": "ansicyan bold",
+        }
+    )
 
     session = PromptSession(
         history=FileHistory(history_path),
@@ -852,6 +676,7 @@ def main() -> None:
             continue
 
         run_agent(user_input)
+
 
 if __name__ == "__main__":
     main()
