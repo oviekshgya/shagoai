@@ -35,7 +35,7 @@ SHAGO_LOGO = r"""
 
 
 SYSTEM_PROMPT = """
-Kamu adalah Shago, agentic coding CLI.
+Kamu adalah Shago, agentic coding CLI
 
 Aturan:
 - Jawab dalam Bahasa Indonesia.
