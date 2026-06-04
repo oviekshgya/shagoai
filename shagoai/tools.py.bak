@@ -1,5 +1,3 @@
-import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -10,309 +8,12 @@ ConfirmCallback = Callable[[str, dict[str, Any]], bool]
 NotifyCallback = Callable[[str, dict[str, Any]], None]
 
 
-IMPORTANT_LINE_PATTERN = re.compile(
-    r"("
-    r"error|failed|failure|fail|fatal|panic|exception|traceback|"
-    r"undefined|cannot|denied|refused|timeout|warning|warn|"
-    r"exit status|segmentation|segfault|"
-    r"build failed|test failed|no such file|permission denied|"
-    r"FAIL|PASS"
-    r")",
-    re.IGNORECASE,
-)
-
-
 def preview_text(text: str, limit: int = 20_000) -> str:
     if len(text) <= limit:
         return text
 
     omitted = len(text) - limit
     return text[:limit] + f"\n\n[TRUNCATED: {omitted} chars omitted]"
-
-
-def normalize_text(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"\n{4,}", "\n\n\n", text)
-    return text.strip()
-
-
-def parse_bool(value: Any, default: bool = True) -> bool:
-    if value is None:
-        return default
-
-    if isinstance(value, bool):
-        return value
-
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def parse_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def load_local_config() -> dict[str, Any]:
-    config_file = Path.home() / ".config" / "shagoai" / "config.json"
-
-    if not config_file.exists():
-        return {}
-
-    try:
-        return json.loads(config_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def get_rpk_settings() -> dict[str, Any]:
-    """
-    RPK = Result Pack.
-    Ini reducer lokal sebelum hasil tool dikirim ke server/model.
-    Config bisa dari ~/.config/shagoai/config.json atau ENV.
-    """
-
-    config = load_local_config()
-
-    enabled = parse_bool(
-        os.getenv("SHAGO_RPK_ENABLED", config.get("rpk_enabled", True)),
-        True,
-    )
-
-    return {
-        "enabled": enabled,
-        "max_tool_chars": parse_int(
-            os.getenv("SHAGO_RPK_MAX_TOOL_CHARS", config.get("rpk_max_tool_chars", 16_000)),
-            16_000,
-        ),
-        "max_read_file_chars": parse_int(
-            os.getenv("SHAGO_RPK_MAX_READ_FILE_CHARS", config.get("rpk_max_read_file_chars", 24_000)),
-            24_000,
-        ),
-        "max_command_chars": parse_int(
-            os.getenv("SHAGO_RPK_MAX_COMMAND_CHARS", config.get("rpk_max_command_chars", 14_000)),
-            14_000,
-        ),
-        "max_search_chars": parse_int(
-            os.getenv("SHAGO_RPK_MAX_SEARCH_CHARS", config.get("rpk_max_search_chars", 12_000)),
-            12_000,
-        ),
-        "max_diff_chars": parse_int(
-            os.getenv("SHAGO_RPK_MAX_DIFF_CHARS", config.get("rpk_max_diff_chars", 18_000)),
-            18_000,
-        ),
-    }
-
-
-def approx_tokens_from_chars(chars: int) -> int:
-    return max(1, chars // 4)
-
-
-def head_tail(text: str, max_chars: int, head_ratio: float = 0.65) -> str:
-    text = normalize_text(text)
-
-    if len(text) <= max_chars:
-        return text
-
-    head_chars = int(max_chars * head_ratio)
-    tail_chars = max_chars - head_chars
-    omitted = len(text) - max_chars
-
-    return (
-        text[:head_chars].rstrip()
-        + f"\n\n[SHAGO_RPK_TRUNCATED: {omitted} chars omitted]\n\n"
-        + text[-tail_chars:].lstrip()
-    )
-
-
-def collect_important_lines(text: str, max_lines: int = 80) -> list[str]:
-    hits: list[str] = []
-    seen = set()
-
-    for idx, line in enumerate(text.splitlines(), start=1):
-        clean = line.strip()
-
-        if not clean:
-            continue
-
-        if not IMPORTANT_LINE_PATTERN.search(clean):
-            continue
-
-        key = clean[:240]
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        hits.append(f"{idx}: {clean}")
-
-        if len(hits) >= max_lines:
-            break
-
-    return hits
-
-
-def compact_lines(text: str, max_lines: int = 180) -> str:
-    text = normalize_text(text)
-    lines = text.splitlines()
-
-    if len(lines) <= max_lines:
-        return "\n".join(lines)
-
-    head_count = int(max_lines * 0.65)
-    tail_count = max_lines - head_count
-    omitted = len(lines) - max_lines
-
-    return "\n".join(
-        lines[:head_count]
-        + ["", f"[SHAGO_RPK_TRUNCATED: {omitted} lines omitted]", ""]
-        + lines[-tail_count:]
-    )
-
-
-def parse_command_sections(content: str) -> tuple[str, str, str]:
-    exit_code = ""
-    stdout = ""
-    stderr = ""
-
-    exit_match = re.search(r"EXIT_CODE:\s*([0-9-]+)", content)
-
-    if exit_match:
-        exit_code = exit_match.group(1)
-
-    stdout_match = re.search(
-        r"STDOUT:\n(?P<stdout>.*?)(?:\n\nSTDERR:\n|$)",
-        content,
-        re.DOTALL,
-    )
-
-    if stdout_match:
-        stdout = stdout_match.group("stdout").strip()
-
-    stderr_match = re.search(
-        r"STDERR:\n(?P<stderr>.*)$",
-        content,
-        re.DOTALL,
-    )
-
-    if stderr_match:
-        stderr = stderr_match.group("stderr").strip()
-
-    return exit_code, stdout, stderr
-
-
-def rpk_pack_command_output(content: str, max_chars: int) -> str:
-    content = normalize_text(content)
-
-    if len(content) <= max_chars:
-        return content
-
-    exit_code, stdout, stderr = parse_command_sections(content)
-
-    important = collect_important_lines(content, max_lines=80)
-
-    stdout_compact = compact_lines(stdout, max_lines=120) if stdout else "(empty)"
-    stderr_compact = compact_lines(stderr, max_lines=100) if stderr else "(empty)"
-
-    rebuilt = []
-
-    rebuilt.append("[SHAGO_RPK]")
-    rebuilt.append(f"type: command_output")
-    rebuilt.append(f"original_chars: {len(content)}")
-    rebuilt.append(f"approx_original_tokens: {approx_tokens_from_chars(len(content))}")
-    rebuilt.append(f"limit_chars: {max_chars}")
-
-    if exit_code:
-        rebuilt.append(f"exit_code: {exit_code}")
-
-    if important:
-        rebuilt.append("")
-        rebuilt.append("IMPORTANT_LINES:")
-        rebuilt.extend(important)
-
-    rebuilt.append("")
-    rebuilt.append("STDOUT_COMPACT:")
-    rebuilt.append(stdout_compact)
-
-    rebuilt.append("")
-    rebuilt.append("STDERR_COMPACT:")
-    rebuilt.append(stderr_compact)
-
-    result = "\n".join(rebuilt)
-
-    if len(result) > max_chars:
-        result = head_tail(result, max_chars)
-
-    saved = len(content) - len(result)
-
-    result += (
-        f"\n\n[SHAGO_RPK_SAVED: approx {approx_tokens_from_chars(saved)} tokens, "
-        f"{saved} chars]"
-    )
-
-    return result
-
-
-def rpk_pack_generic(tool_name: str, content: str, max_chars: int) -> str:
-    content = normalize_text(content)
-
-    if len(content) <= max_chars:
-        return content
-
-    important = collect_important_lines(content, max_lines=60)
-    compact = head_tail(content, max_chars)
-
-    header = [
-        "[SHAGO_RPK]",
-        f"type: {tool_name}",
-        f"original_chars: {len(content)}",
-        f"approx_original_tokens: {approx_tokens_from_chars(len(content))}",
-        f"limit_chars: {max_chars}",
-    ]
-
-    if important:
-        header.extend(["", "IMPORTANT_LINES:"])
-        header.extend(important)
-
-    result = "\n".join(header) + "\n\nCONTENT_COMPACT:\n" + compact
-
-    if len(result) > max_chars:
-        result = head_tail(result, max_chars)
-
-    saved = len(content) - len(result)
-
-    result += (
-        f"\n\n[SHAGO_RPK_SAVED: approx {approx_tokens_from_chars(saved)} tokens, "
-        f"{saved} chars]"
-    )
-
-    return result
-
-
-def rpk_pack_result(tool_name: str, content: str) -> str:
-    settings = get_rpk_settings()
-
-    if not settings["enabled"]:
-        return content
-
-    if tool_name == "read_file":
-        max_chars = settings["max_read_file_chars"]
-        return rpk_pack_generic(tool_name, content, max_chars)
-
-    if tool_name == "run_cmd":
-        max_chars = settings["max_command_chars"]
-        return rpk_pack_command_output(content, max_chars)
-
-    if tool_name == "search_text":
-        max_chars = settings["max_search_chars"]
-        return rpk_pack_generic(tool_name, content, max_chars)
-
-    if tool_name == "git_diff":
-        max_chars = settings["max_diff_chars"]
-        return rpk_pack_generic(tool_name, content, max_chars)
-
-    max_chars = settings["max_tool_chars"]
-    return rpk_pack_generic(tool_name, content, max_chars)
 
 
 def is_dangerous_command(command: str) -> bool:
@@ -357,6 +58,8 @@ class LocalTools:
         if guard == "approval required":
             return True
 
+        # Mode /auto: command non-destruktif boleh jalan,
+        # tapi write_file tetap harus approval.
         if action == "write_file":
             return True
 
@@ -388,6 +91,7 @@ class LocalTools:
 
         resolved = raw.resolve()
 
+        # Semua file operation dibatasi agar tidak keluar dari workspace.
         if resolved != self.root and self.root not in resolved.parents:
             raise ValueError(f"path keluar dari workspace: {path}")
 
@@ -414,8 +118,7 @@ class LocalTools:
                 suffix = "/" if item.is_dir() else ""
                 rows.append(f"{item.name}{suffix}")
 
-            result = "\n".join(rows) if rows else "(empty directory)"
-            return rpk_pack_result("list_dir", result)
+            return "\n".join(rows) if rows else "(empty directory)"
         except Exception as exc:
             return f"ERROR: {exc}"
 
@@ -435,9 +138,7 @@ class LocalTools:
                 return f"ERROR: not a file: {path}"
 
             data = target.read_text(encoding="utf-8", errors="replace")
-            result = data
-
-            return rpk_pack_result("read_file", result)
+            return preview_text(data)
         except Exception as exc:
             return f"ERROR: {exc}"
 
@@ -502,13 +203,11 @@ class LocalTools:
                 timeout=60,
             )
 
-            output = (
+            return (
                 f"EXIT_CODE: {result.returncode}\n\n"
-                f"STDOUT:\n{result.stdout}\n\n"
-                f"STDERR:\n{result.stderr}"
+                f"STDOUT:\n{preview_text(result.stdout, 12_000)}\n\n"
+                f"STDERR:\n{preview_text(result.stderr, 12_000)}"
             )
-
-            return rpk_pack_result("run_cmd", output)
         except subprocess.TimeoutExpired:
             return "ERROR: command timeout after 60 seconds"
         except Exception as exc:
@@ -563,12 +262,10 @@ class LocalTools:
                         rel = file_path.relative_to(self.root)
                         hits.append(f"{rel}:{idx}: {line.strip()}")
 
-                        if len(hits) >= 200:
-                            result = "\n".join(hits) + "\n\n[TRUNCATED: max 200 hits]"
-                            return rpk_pack_result("search_text", result)
+                        if len(hits) >= 100:
+                            return "\n".join(hits) + "\n\n[TRUNCATED: max 100 hits]"
 
-            result = "\n".join(hits) if hits else "No matches"
-            return rpk_pack_result("search_text", result)
+            return "\n".join(hits) if hits else "No matches"
         except Exception as exc:
             return f"ERROR: {exc}"
 
@@ -578,8 +275,7 @@ class LocalTools:
 
     def git_diff(self) -> str:
         """Show git diff for the workspace."""
-        output = self.run_cmd("git diff -- .")
-        return rpk_pack_result("git_diff", output)
+        return self.run_cmd("git diff -- .")
 
     def undo_last_write(self) -> str:
         if not self.last_write_backup:
@@ -618,6 +314,10 @@ class LocalTools:
         return tools[name](**args)
 
     def tool_specs(self) -> list[dict[str, Any]]:
+        """
+        JSON schema untuk Shago AI Server nanti.
+        Format ini sengaja generic agar server bisa meneruskan ke model internal apa pun.
+        """
         return [
             {
                 "type": "function",

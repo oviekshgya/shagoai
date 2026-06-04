@@ -8,10 +8,17 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
 DEFAULT_CONFIG = {
-    "api_url": "http://127.0.0.1:8787",
+    "api_url": "http://127.0.0.1:8184",
     "token": "",
     "model": "default",
     "guard": "approval required",
+
+    "rpk_enabled": True,
+    "rpk_max_tool_chars": 16000,
+    "rpk_max_read_file_chars": 24000,
+    "rpk_max_command_chars": 14000,
+    "rpk_max_search_chars": 12000,
+    "rpk_max_diff_chars": 18000,
 }
 
 

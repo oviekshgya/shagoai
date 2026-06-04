@@ -382,7 +382,18 @@ def handle_config_command(raw: str) -> bool:
         key = parts[2].strip()
         value = parts[3].strip()
 
-        allowed = {"api_url", "token", "model", "guard"}
+        allowed = {
+         "api_url",
+         "token",
+         "model",
+         "guard",
+         "rpk_enabled",
+         "rpk_max_tool_chars",
+         "rpk_max_read_file_chars",
+         "rpk_max_command_chars",
+         "rpk_max_search_chars",
+         "rpk_max_diff_chars",
+        }
 
         if key not in allowed:
             console.print(f"[red]Invalid config key:[/red] {key}")
