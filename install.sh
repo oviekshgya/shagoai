@@ -32,9 +32,7 @@ python3 -m pipx ensurepath >/dev/null 2>&1 || true
 export PATH="$HOME/.local/bin:$PATH"
 
 if command -v "$APP_NAME" >/dev/null 2>&1; then
-  echo "Existing SHAGO AI found:"
-  "$APP_NAME" --version 2>/dev/null || true
-  echo ""
+  echo "Existing SHAGO AI found."
   echo "Updating SHAGO AI..."
 else
   echo "Installing SHAGO AI..."
@@ -80,9 +78,6 @@ echo ""
 echo "SHAGO AI ready."
 echo ""
 
-if command -v "$APP_NAME" >/dev/null 2>&1; then
-  "$APP_NAME" --version 2>/dev/null || true
-fi
 
 echo ""
 echo "Run:"
