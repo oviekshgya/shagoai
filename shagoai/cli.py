@@ -641,6 +641,12 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"shagoai {__version__}",
+    )
+
+    parser.add_argument(
         "-C",
         "--workspace",
         default=None,
@@ -658,12 +664,6 @@ def main() -> None:
         "--api-url",
         default=None,
         help="Set Shago AI Server URL for this session.",
-    )
-    
-    parser.add_argument(
-        "--version",
-        action="store_true",
-        help="Show SHAGO AI version.",
     )
     args = parser.parse_args()
 	

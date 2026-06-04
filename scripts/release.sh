@@ -94,6 +94,40 @@ echo "Built:"
 ls -lh "$WHEEL"
 
 echo ""
+echo "Testing built wheel in isolated venv..."
+
+TEST_VENV="$(mktemp -d)"
+python -m venv "$TEST_VENV/venv"
+"$TEST_VENV/venv/bin/python" -m pip install --upgrade pip >/dev/null
+"$TEST_VENV/venv/bin/python" -m pip install "$WHEEL" >/dev/null
+
+VERSION_OUTPUT="$("$TEST_VENV/venv/bin/shagoai" --version 2>&1 || true)"
+
+echo "Version output:"
+echo "$VERSION_OUTPUT"
+
+if echo "$VERSION_OUTPUT" | grep -q "SHAGO//AGENT"; then
+  echo "ERROR: shagoai --version opened banner."
+  echo "Fix cli.py before release."
+  rm -rf "$TEST_VENV"
+  exit 1
+fi
+
+EXPECTED_OUTPUT="shagoai $VERSION"
+
+if [ "$VERSION_OUTPUT" != "$EXPECTED_OUTPUT" ]; then
+  echo "ERROR: invalid --version output"
+  echo "Expected: $EXPECTED_OUTPUT"
+  echo "Got     : $VERSION_OUTPUT"
+  rm -rf "$TEST_VENV"
+  exit 1
+fi
+
+rm -rf "$TEST_VENV"
+
+echo "Wheel test passed."
+
+echo ""
 echo "Uploading to server:"
 echo "  ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/${WHEEL_NAME}"
 echo ""

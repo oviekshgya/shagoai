@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: shagoai
-Version: 0.1.2
+Version: 0.1.3
 Summary: Shago local agentic coding CLI
 Author-email: Oviek Shagya <oviekshagya51@gmail.com>
 Requires-Python: >=3.10
