@@ -1,0 +1,2 @@
+[console_scripts]
+shagoai = shagoai.cli:main

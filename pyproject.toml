@@ -1,0 +1,13 @@
+[project]
+name = "shagoai"
+version = "0.1.0"
+description = "Shago local agentic coding CLI"
+requires-python = ">=3.10"
+dependencies = ["ollama", "rich", "prompt_toolkit"]
+
+[project.scripts]
+shagoai = "shagoai.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

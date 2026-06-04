@@ -1,0 +1,9 @@
+pyproject.toml
+shagoai/__init__.py
+shagoai/cli.py
+shagoai.egg-info/PKG-INFO
+shagoai.egg-info/SOURCES.txt
+shagoai.egg-info/dependency_links.txt
+shagoai.egg-info/entry_points.txt
+shagoai.egg-info/requires.txt
+shagoai.egg-info/top_level.txt
