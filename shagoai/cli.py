@@ -298,6 +298,15 @@ def run_agent(user_prompt: str) -> None:
 
         message = response.get("message") or {}
         tool_calls = get_tool_calls(message)
+        
+        capman = response.get("capman") or {}
+
+        if capman.get("enabled") and capman.get("saved_chars", 0) > 0:
+            console.print(
+                f"[dim]CapMan saved approx "
+                f"{capman.get('approx_saved_tokens', 0)} tokens "
+                f"({capman.get('saved_chars', 0)} chars).[/dim]"
+            )
 
         if not tool_calls:
             content = get_message_content(message).strip()
