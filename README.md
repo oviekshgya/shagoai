@@ -87,7 +87,7 @@ gemma4:31b-cloud    c382fbfbc73b    -       27 minutes ago
 Struktur project yang direkomendasikan:
 
 ```txt
-ollama-agent/
+shagoai/
 ├── pyproject.toml
 ├── README.md
 └── shagoai/
@@ -110,7 +110,7 @@ File `__init__.py` juga boleh kosong.
 Dari root project:
 
 ```bash
-cd ~/project/python/ollama-agent
+cd ~/project/python/shagoai
 pip install -e .
 ```
 
