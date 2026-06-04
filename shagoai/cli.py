@@ -1,3 +1,4 @@
+from shagoai.config import load_config, set_config_value, CONFIG_FILE
 import argparse
 import os
 import re
@@ -51,14 +52,14 @@ CONFIG_DIR = Path.home() / ".config" / "shagoai"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
-def load_config() -> dict[str, Any]:
-    try:
-        if CONFIG_FILE.exists():
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pass
+# def load_config() -> dict[str, Any]:
+#     try:
+#         if CONFIG_FILE.exists():
+#             return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+#     except Exception:
+#         pass
 
-    return {}
+#     return {}
 
 
 def save_config(data: dict[str, Any]) -> None:
@@ -740,7 +741,53 @@ def handle_command(command: str) -> bool:
 
         STATE.last_write_backup = None
         return True
+    
+    if raw == "/config":
+        config = load_config()
 
+        table = Table(title="SHAGO config", border_style="cyan")
+        table.add_column("Key", style="cyan")
+        table.add_column("Value", style="white")
+
+        for key, value in config.items():
+            if key == "token" and value:
+                value = value[:6] + "..." + value[-4:]
+
+            table.add_row(str(key), str(value))
+
+        console.print(table)
+        console.print(f"[dim]config file: {CONFIG_FILE}[/dim]")
+        console.print("[dim]Usage: /config set <key> <value>[/dim]")
+        return True
+
+    if raw.startswith("/config set "):
+        parts = raw.split(" ", 3)
+
+        if len(parts) < 4:
+            console.print("[red]Usage:[/red] /config set <key> <value>")
+            return True
+
+        key = parts[2].strip()
+        value = parts[3].strip()
+
+        allowed = {"api_url", "token", "model", "guard"}
+
+        if key not in allowed:
+            console.print(f"[red]Invalid config key:[/red] {key}")
+            console.print(f"[dim]Allowed keys: {', '.join(sorted(allowed))}[/dim]")
+            return True
+
+        set_config_value(key, value)
+
+        if key == "model":
+            STATE.model = value
+
+        if key == "guard":
+            STATE.guard = value
+
+        console.print(f"[green]config updated:[/green] {key}")
+        return True
+    
     console.print(f"[red]Unknown command:[/red] {raw}")
     return True
 

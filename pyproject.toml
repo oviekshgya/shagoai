@@ -2,12 +2,14 @@
 name = "shagoai"
 version = "0.1.0"
 description = "Shago local agentic coding CLI"
+readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["ollama", "rich", "prompt_toolkit"]
+authors = [{ name = "Oviek Shagya", email = "oviekshagya51@gmail.com" }]
+dependencies = ["rich", "prompt_toolkit", "requests"]
 
 [project.scripts]
 shagoai = "shagoai.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
